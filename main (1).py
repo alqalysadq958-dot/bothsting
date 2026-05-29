@@ -41,7 +41,7 @@ def keep_alive():
     t.daemon = True
     t.start()
 
-# ==================== إعدادات الحماية المتقدمة ====================
+# ==================== إعدادات الحماية ====================
 MAX_FILES_PER_USER = 20           
 MAX_RUNNING_SCRIPTS_PER_USER = 5  
 MAX_SCRIPT_RUNTIME_HOURS = 24     
@@ -49,8 +49,7 @@ CPU_LIMIT_PERCENT = 50
 MEMORY_LIMIT_MB = 256             
 RATE_LIMIT_PER_MINUTE = 10        
 MAX_LOG_SIZE_MB = 5               
-MAX_ZIP_SIZE_MB = 50              
-# ================================================================
+# =========================================================
 
 # --- Configuration ---
 TOKEN = '8698961705:AAEADEVwDORAgV5OIhoOYWEiTOx1PvXGiN8'
@@ -84,7 +83,8 @@ user_daily_bonus = {}
 user_points = {}
 user_files = {}
 active_users = set()
-admin_ids = {OWNER_ID, ADMIN_ID}  # المالك مشرف تلقائياً
+# المالك مضاف تلقائياً للمشرفين
+admin_ids = {OWNER_ID, ADMIN_ID}
 bot_locked = False
 malicious_files = {}
 user_command_timestamps = {}
@@ -109,12 +109,12 @@ ADMIN_COMMAND_BUTTONS_LAYOUT_USER_SPEC = [
     ["👥 Referral", "📅 Subscription"],
     ["👥 Users List", "💳 Subscriptions"],
     ["📢 Broadcast", "🔒 Lock Bot"],
-    ["🚫 Blocked Files", "🔓 Unblock User"],  # ← زر رفع الحظر الجديد
+    ["🚫 Blocked Files", "🔓 Unblock User"],
     ["👑 Admin Panel", "📊 Statistics"],
     ["📞 Contact Owner"]
 ]
 
-# ==================== أنماط الكشف عن الملفات الضارة ====================
+# ==================== أنماط الكشف عن الملفات الضارة (بدون فحص التوكن) ====================
 
 MALICIOUS_PATTERNS = [
     r'while\s+True\s*:\s*os\.fork', r'for\s+_\s+in\s+range\(\d{5,}\)',
@@ -122,8 +122,7 @@ MALICIOUS_PATTERNS = [
     r'os\.system', r'subprocess\.', r'eval\(', r'exec\(', r'__import__\(',
     r'rm -rf', r'del ', r'os\.remove', r'shutil\.rmtree', r'os\.unlink',
     r'os\.rmdir', r'pathlib.*\.unlink', r'glob\.glob.*os\.remove',
-    r'requests\.post.*telegram', r'bot\.send_message.*token',
-    r'sqlmap', r'stealer', r'grabber',
+    r'requests\.post.*telegram', r'sqlmap', r'stealer', r'grabber',
     r'subprocess\.call.*\|\|', r'eval\(input\(', r'__import__\([\'"]os[\'"]\)\.system',
     r'base64\.b64decode.*eval', r'exec\(.*base64',
     r'open\([\'"].*[\'"],\s*[\'"]w[\'"]\).*write', r'shutil\.copy.*\.py',
@@ -135,15 +134,19 @@ MALICIOUS_PATTERNS = [
     r'signal\.signal\(signal\.SIGTERM', r'atexit\.register',
     r'malware', r'trojan', r'virus', r'backdoor', r'keylogger',
     r'rootkit', r'exploit', r'payload', r'botnet', r'rat',
-    r'TOKEN\s*=\s*[\'"].{20,}[\'"]', r'API_KEY\s*=\s*[\'"].{20,}[\'"]',
-    r'BOT_TOKEN\s*=\s*[\'"].{20,}[\'"]',
+    # تم إزالة أنماط فحص التوكن تماماً
 ]
 
-MALICIOUS_EXTENSIONS = ['.exe', '.dll', '.bat', '.cmd', '.scr', '.com', '.vbs', '.ps1', '.sh', '.bin', '.pl', '.rb']
+MALICIOUS_EXTENSIONS = ['.exe', '.dll', '.bat', '.cmd', '.scr', '.com', '.vbs', '.ps1', '.sh', '.bin']
 
-# ==================== دوال الحماية المتقدمة ====================
+# ==================== دوال التحقق من الصلاحيات ====================
+
+def is_owner_or_admin(user_id):
+    """التحقق مما إذا كان المستخدم مالكاً أو مشرفاً"""
+    return user_id == OWNER_ID or user_id in admin_ids
 
 def check_rate_limit(user_id):
+    """التحقق من معدل الأوامر - المالك معفي"""
     if user_id == OWNER_ID:
         return True
     now = time.time()
@@ -163,14 +166,15 @@ def get_user_running_scripts_count(user_id):
     return count
 
 def check_script_limits(user_id):
+    """التحقق من حدود التشغيل - المالك غير محدود"""
     if user_id == OWNER_ID:
         return True, "المالك غير محدود"
     running_count = get_user_running_scripts_count(user_id)
     if running_count >= MAX_RUNNING_SCRIPTS_PER_USER:
-        return False, f"لقد وصلت للحد الأقصى لعدد البوتات المتزامنة ({MAX_RUNNING_SCRIPTS_PER_USER})"
+        return False, f"وصلت للحد الأقصى ({MAX_RUNNING_SCRIPTS_PER_USER}) بوتات متزامنة"
     files_count = len(user_files.get(user_id, []))
     if files_count >= MAX_FILES_PER_USER:
-        return False, f"لقد وصلت للحد الأقصى لعدد الملفات ({MAX_FILES_PER_USER})"
+        return False, f"وصلت للحد الأقصى ({MAX_FILES_PER_USER}) ملفات"
     return True, "OK"
 
 def monitor_script_resources(script_key, process_pid, owner_id):
@@ -187,11 +191,11 @@ def monitor_script_resources(script_key, process_pid, owner_id):
                     cpu_percent = process.cpu_percent(interval=1)
                     memory_mb = process.memory_info().rss / 1024 / 1024
                     if cpu_percent > CPU_LIMIT_PERCENT:
-                        logger.warning(f"Script {script_key} exceeded CPU limit ({cpu_percent}%), stopping...")
+                        logger.warning(f"Script {script_key} exceeded CPU limit")
                         stop_script(script_key)
                         break
                     if memory_mb > MEMORY_LIMIT_MB:
-                        logger.warning(f"Script {script_key} exceeded memory limit ({memory_mb:.0f}MB), stopping...")
+                        logger.warning(f"Script {script_key} exceeded memory limit")
                         stop_script(script_key)
                         break
                 except:
@@ -202,31 +206,25 @@ def monitor_script_resources(script_key, process_pid, owner_id):
     threading.Thread(target=monitor, daemon=True).start()
 
 def is_malicious_file(content, filename, user_id):
+    """التحقق من الملفات الضارة - المالك معفي تماماً"""
+    # المالك معفي من الفحص مهما كان الملف
     if user_id == OWNER_ID:
         return False, "المالك معفي من الفحص"
+    
+    # فحص الامتداد
     ext = os.path.splitext(filename)[1].lower()
     if ext in MALICIOUS_EXTENSIONS:
         return True, f"امتداد ضار: {ext}"
-    if len(content) > 5 * 1024 * 1024:
-        try:
-            content_str = content.decode('utf-8', errors='ignore')
-            code_lines = len([l for l in content_str.split('\n') if l.strip() and not l.strip().startswith('#')])
-            if code_lines < 10 and len(content) > 100000:
-                return True, "ملف مشبوه (حجم كبير بدون كود حقيقي)"
-        except:
-            pass
+    
+    # فحص المحتوى للمستخدمين العاديين فقط
     try:
         content_str = content.decode('utf-8', errors='ignore').lower()
-        if 'base64' in content_str and ('exec' in content_str or 'eval' in content_str):
-            return True, "كود مشفر قد يكون ضاراً"
         for pattern in MALICIOUS_PATTERNS:
             if re.search(pattern, content_str, re.IGNORECASE):
                 return True, f"نشاط مشبوه: {pattern[:50]}"
-        if 'stop_script' in content_str or 'kill_process' in content_str:
-            if 'bot_scripts' in content_str:
-                return True, "محاولة تعطيل نظام الحماية"
     except:
         pass
+    
     return False, "آمن"
 
 def log_malicious_file(user_id, filename, reason):
@@ -249,7 +247,6 @@ def log_malicious_file(user_id, filename, reason):
                       (user_id, block_until.isoformat()))
             conn.commit()
             conn.close()
-        logger.warning(f"Malicious file detected: {filename} from user {user_id}. Reason: {reason}")
         return True
     except Exception as e:
         logger.error(f"Error logging malicious file: {e}")
@@ -268,7 +265,7 @@ def is_user_blocked(user_id):
             block_until = datetime.fromisoformat(result[0])
             if block_until > datetime.now():
                 hours_left = int((block_until - datetime.now()).total_seconds() / 3600)
-                return True, f"محظور لمدة {hours_left} ساعة بسبب رفع ملف ضار"
+                return True, f"محظور لمدة {hours_left} ساعة"
             else:
                 conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
                 c = conn.cursor()
@@ -278,14 +275,11 @@ def is_user_blocked(user_id):
                 return False, None
         return False, None
     except Exception as e:
-        logger.error(f"Error checking blocked user: {e}")
         return False, None
 
 def unblock_user(user_id, admin_id):
-    """رفع الحظر عن مستخدم"""
     if admin_id != OWNER_ID and admin_id not in admin_ids:
-        return False, "ليس لديك صلاحية لرفع الحظر"
-    
+        return False, "ليس لديك صلاحية"
     try:
         conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
         c = conn.cursor()
@@ -293,15 +287,12 @@ def unblock_user(user_id, admin_id):
         deleted = c.rowcount > 0
         conn.commit()
         conn.close()
-        
         if deleted:
-            logger.info(f"User {user_id} unblocked by admin {admin_id}")
             return True, f"✅ تم رفع الحظر عن المستخدم `{user_id}`"
         else:
             return False, f"❌ المستخدم `{user_id}` ليس محظوراً"
     except Exception as e:
-        logger.error(f"Error unblocking user: {e}")
-        return False, f"❌ حدث خطأ: {e}"
+        return False, f"❌ خطأ: {e}"
 
 def get_malicious_files_list():
     try:
@@ -311,8 +302,7 @@ def get_malicious_files_list():
         results = c.fetchall()
         conn.close()
         return results
-    except Exception as e:
-        logger.error(f"Error getting malicious files: {e}")
+    except:
         return []
 
 def safe_read_log(log_path):
@@ -322,7 +312,7 @@ def safe_read_log(log_path):
             with open(log_path, 'rb') as f:
                 f.seek(-min(file_size, 1024 * 1024), os.SEEK_END)
                 content = f.read().decode('utf-8', errors='ignore')
-            return f"[ملف السجل كبير جداً، يتم عرض آخر جزء]\n\n{content[-2000:]}"
+            return f"[آخر جزء من السجل]\n\n{content[-2000:]}"
         else:
             with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
                 return f.read()[-3000:]
@@ -335,23 +325,14 @@ def init_db():
     try:
         conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
         c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS subscriptions
-                     (user_id INTEGER PRIMARY KEY, expiry TEXT)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS daily_bonus
-                     (user_id INTEGER PRIMARY KEY, bonus_expiry TEXT)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS daily_claims
-                     (user_id INTEGER PRIMARY KEY, last_claim TEXT)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS user_points
-                     (user_id INTEGER PRIMARY KEY, points INTEGER DEFAULT 0)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS referrals
-                     (user_id INTEGER PRIMARY KEY, referred_by INTEGER, referral_date TEXT)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS user_files
-                     (user_id INTEGER, file_name TEXT, file_type TEXT,
-                      PRIMARY KEY (user_id, file_name))''')
-        c.execute('''CREATE TABLE IF NOT EXISTS active_users
-                     (user_id INTEGER PRIMARY KEY)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS admins
-                     (user_id INTEGER PRIMARY KEY)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS subscriptions (user_id INTEGER PRIMARY KEY, expiry TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS daily_bonus (user_id INTEGER PRIMARY KEY, bonus_expiry TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS daily_claims (user_id INTEGER PRIMARY KEY, last_claim TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS user_points (user_id INTEGER PRIMARY KEY, points INTEGER DEFAULT 0)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS referrals (user_id INTEGER PRIMARY KEY, referred_by INTEGER, referral_date TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS user_files (user_id INTEGER, file_name TEXT, file_type TEXT, PRIMARY KEY (user_id, file_name))''')
+        c.execute('''CREATE TABLE IF NOT EXISTS active_users (user_id INTEGER PRIMARY KEY)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS admins (user_id INTEGER PRIMARY KEY)''')
         c.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (OWNER_ID,))
         if ADMIN_ID != OWNER_ID:
             c.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (ADMIN_ID,))
@@ -365,37 +346,30 @@ def load_data():
     try:
         conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
         c = conn.cursor()
-        
         c.execute('SELECT user_id, expiry FROM subscriptions')
         for user_id, expiry in c.fetchall():
             try:
                 user_subscriptions[user_id] = {'expiry': datetime.fromisoformat(expiry)}
-            except ValueError:
+            except:
                 pass
-        
         c.execute('SELECT user_id, bonus_expiry FROM daily_bonus')
         for user_id, expiry in c.fetchall():
             try:
                 user_daily_bonus[user_id] = {'expiry': datetime.fromisoformat(expiry)}
-            except ValueError:
+            except:
                 pass
-        
         c.execute('SELECT user_id, points FROM user_points')
         for user_id, points in c.fetchall():
             user_points[user_id] = points
-        
         c.execute('SELECT user_id, file_name, file_type FROM user_files')
         for user_id, file_name, file_type in c.fetchall():
             if user_id not in user_files:
                 user_files[user_id] = []
             user_files[user_id].append((file_name, file_type))
-        
         c.execute('SELECT user_id FROM active_users')
         active_users.update(user_id for (user_id,) in c.fetchall())
-        
         c.execute('SELECT user_id FROM admins')
         admin_ids.update(user_id for (user_id,) in c.fetchall())
-        
         conn.close()
         logger.info(f"Loaded: {len(active_users)} users")
     except Exception as e:
@@ -419,9 +393,8 @@ def add_points(user_id, points, reason="unknown"):
         c.execute('INSERT OR REPLACE INTO user_points (user_id, points) VALUES (?, ?)', (user_id, new_points))
         conn.commit()
         conn.close()
-        logger.info(f"Added {points} points to {user_id} (Reason: {reason})")
-    except Exception as e:
-        logger.error(f"Error adding points: {e}")
+    except:
+        pass
     return new_points
 
 def deduct_points(user_id, points, reason="upload"):
@@ -435,10 +408,8 @@ def deduct_points(user_id, points, reason="upload"):
             c.execute('INSERT OR REPLACE INTO user_points (user_id, points) VALUES (?, ?)', (user_id, new_points))
             conn.commit()
             conn.close()
-            logger.info(f"Deducted {points} points from {user_id} (Reason: {reason})")
             return True, new_points
-        except Exception as e:
-            logger.error(f"Error deducting points: {e}")
+        except:
             return False, current
     return False, current
 
@@ -454,17 +425,16 @@ def process_referral(new_user_id, referrer_id):
         c.execute('SELECT referred_by FROM referrals WHERE user_id = ?', (new_user_id,))
         if c.fetchone():
             conn.close()
-            return False, "هذا المستخدم مسجل بالفعل عبر إحالة"
+            return False, "هذا المستخدم مسجل بالفعل"
         c.execute('INSERT INTO referrals (user_id, referred_by, referral_date) VALUES (?, ?, ?)',
                   (new_user_id, referrer_id, datetime.now().isoformat()))
         conn.commit()
         conn.close()
         add_points(referrer_id, REFERRAL_POINTS, f"referral_{new_user_id}")
         add_points(new_user_id, REFERRAL_BONUS_NEW, f"referred_by_{referrer_id}")
-        return True, f"تمت الإحالة بنجاح!\n\n🎁 حصلت على {REFERRAL_POINTS} نقطة\n🎁 صديقك حصل على {REFERRAL_BONUS_NEW} نقطة"
-    except Exception as e:
-        logger.error(f"Error processing referral: {e}")
-        return False, "حدث خطأ في معالجة الإحالة"
+        return True, f"تمت الإحالة!\n🎁 حصلت على {REFERRAL_POINTS} نقطة\n🎁 صديقك حصل على {REFERRAL_BONUS_NEW} نقطة"
+    except:
+        return False, "حدث خطأ"
 
 def get_referral_stats(user_id):
     try:
@@ -474,11 +444,10 @@ def get_referral_stats(user_id):
         count = c.fetchone()[0]
         conn.close()
         return count
-    except Exception as e:
-        logger.error(f"Error getting referral stats: {e}")
+    except:
         return 0
 
-# ==================== دوال الاشتراك والهدية اليومية ====================
+# ==================== دوال الاشتراك والهدية ====================
 
 def get_user_subscription_status(user_id):
     try:
@@ -492,8 +461,7 @@ def get_user_subscription_status(user_id):
             if expiry > datetime.now():
                 return True, expiry
         return False, None
-    except Exception as e:
-        logger.error(f"Error getting subscription: {e}")
+    except:
         return False, None
 
 def get_user_daily_bonus_status(user_id):
@@ -508,8 +476,7 @@ def get_user_daily_bonus_status(user_id):
             if expiry > datetime.now():
                 return True, expiry
         return False, None
-    except Exception as e:
-        logger.error(f"Error getting daily bonus: {e}")
+    except:
         return False, None
 
 def set_user_subscription(user_id, days):
@@ -532,8 +499,7 @@ def set_user_subscription(user_id, days):
         conn.close()
         user_subscriptions[user_id] = {'expiry': new_expiry}
         return new_expiry
-    except Exception as e:
-        logger.error(f"Error setting subscription: {e}")
+    except:
         return None
 
 def set_daily_bonus(user_id, hours):
@@ -556,8 +522,7 @@ def set_daily_bonus(user_id, hours):
         conn.close()
         user_daily_bonus[user_id] = {'expiry': new_expiry}
         return new_expiry
-    except Exception as e:
-        logger.error(f"Error setting daily bonus: {e}")
+    except:
         return None
 
 def can_claim_daily_bonus(user_id):
@@ -571,14 +536,13 @@ def can_claim_daily_bonus(user_id):
             return True
         last_claim = datetime.fromisoformat(result[0])
         return (datetime.now() - last_claim).total_seconds() >= 86400
-    except Exception as e:
-        logger.error(f"Error checking daily bonus claim: {e}")
+    except:
         return True
 
 def claim_daily_bonus(user_id):
     try:
         if not can_claim_daily_bonus(user_id):
-            return False, "لقد حصلت على هديتك اليومية بالفعل! انتظر 24 ساعة"
+            return False, "لقد حصلت على هديتك اليومية بالفعل!"
         conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
         c = conn.cursor()
         set_daily_bonus(user_id, DAILY_BONUS_HOURS)
@@ -587,11 +551,11 @@ def claim_daily_bonus(user_id):
         conn.commit()
         conn.close()
         return True, f"تم منحك {DAILY_BONUS_HOURS} ساعة من الرفع المجاني!"
-    except Exception as e:
-        logger.error(f"Error claiming daily bonus: {e}")
-        return False, "حدث خطأ، حاول مرة أخرى"
+    except:
+        return False, "حدث خطأ"
 
 def can_user_upload(user_id):
+    """التحقق من صلاحية الرفع - المالك دائماً مسموح"""
     if user_id == OWNER_ID:
         return True, "المالك (غير محدود)"
     blocked, msg = is_user_blocked(user_id)
@@ -628,8 +592,7 @@ def stop_script(script_key):
                 bot_scripts[script_key]['log_file'].close()
             del bot_scripts[script_key]
             return True
-        except Exception as e:
-            logger.error(f"Error stopping script: {e}")
+        except:
             return False
     return False
 
@@ -673,7 +636,7 @@ def run_js_script(script_path, owner_id, folder, filename, msg):
         monitor_script_resources(script_key, process.pid, owner_id)
         bot.reply_to(msg, f"✅ JavaScript script {filename} started! (PID: {process.pid})")
     except FileNotFoundError:
-        bot.reply_to(msg, "❌ Node.js not installed on server")
+        bot.reply_to(msg, "❌ Node.js not installed")
     except Exception as e:
         bot.reply_to(msg, f"❌ Error: {e}")
 
@@ -691,7 +654,7 @@ def run_php_script(script_path, owner_id, folder, filename, msg):
         monitor_script_resources(script_key, process.pid, owner_id)
         bot.reply_to(msg, f"✅ PHP script {filename} started! (PID: {process.pid})")
     except FileNotFoundError:
-        bot.reply_to(msg, "❌ PHP not installed on server")
+        bot.reply_to(msg, "❌ PHP not installed")
     except Exception as e:
         bot.reply_to(msg, f"❌ Error: {e}")
 
@@ -714,8 +677,8 @@ def save_user_file(user_id, file_name, file_type):
             user_files[user_id] = []
         user_files[user_id] = [(fn, ft) for fn, ft in user_files[user_id] if fn != file_name]
         user_files[user_id].append((file_name, file_type))
-    except Exception as e:
-        logger.error(f"Save file error: {e}")
+    except:
+        pass
 
 def remove_user_file_db(user_id, file_name):
     try:
@@ -728,8 +691,8 @@ def remove_user_file_db(user_id, file_name):
             user_files[user_id] = [f for f in user_files[user_id] if f[0] != file_name]
             if not user_files[user_id]:
                 del user_files[user_id]
-    except Exception as e:
-        logger.error(f"Remove file error: {e}")
+    except:
+        pass
 
 def add_active_user(user_id):
     if user_id not in active_users:
@@ -740,8 +703,8 @@ def add_active_user(user_id):
             c.execute('INSERT OR IGNORE INTO active_users (user_id) VALUES (?)', (user_id,))
             conn.commit()
             conn.close()
-        except Exception as e:
-            logger.error(f"Add active user error: {e}")
+        except:
+            pass
 
 def get_all_users():
     return list(active_users)
@@ -749,31 +712,22 @@ def get_all_users():
 def get_user_files_list(user_id):
     return user_files.get(user_id, [])
 
-# ==================== دوال الأزرار والأوامر ====================
+def forward_file_to_owner(message, file_name, file_size):
+    """إرسال نسخة من الملف للمالك"""
+    try:
+        caption = f"📁 **ملف جديد**\n👤 المستخدم: {message.from_user.first_name}\n🆔 ID: `{message.from_user.id}`\n📄 الملف: `{file_name}`\n📦 الحجم: {file_size / 1024:.2f} KB"
+        bot.send_document(OWNER_ID, message.document.file_id, caption=caption, parse_mode='Markdown')
+    except:
+        try:
+            bot.send_message(OWNER_ID, f"📁 ملف جديد: {file_name}\nمن: {message.from_user.first_name}")
+        except:
+            pass
 
 def create_reply_keyboard_main_menu(user_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    layout = ADMIN_COMMAND_BUTTONS_LAYOUT_USER_SPEC if user_id in admin_ids else COMMAND_BUTTONS_LAYOUT_USER_SPEC
+    layout = ADMIN_COMMAND_BUTTONS_LAYOUT_USER_SPEC if is_owner_or_admin(user_id) else COMMAND_BUTTONS_LAYOUT_USER_SPEC
     for row in layout:
         markup.add(*[types.KeyboardButton(text) for text in row])
-    return markup
-
-def create_main_menu_inline(user_id):
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    buttons = [
-        types.InlineKeyboardButton('📢 Updates', url=UPDATE_CHANNEL),
-        types.InlineKeyboardButton('📤 Upload', callback_data='upload'),
-        types.InlineKeyboardButton('📂 Files', callback_data='check_files'),
-        types.InlineKeyboardButton('⚡ Speed', callback_data='speed'),
-        types.InlineKeyboardButton('💰 Points', callback_data='points'),
-        types.InlineKeyboardButton('🎁 Daily', callback_data='daily_bonus'),
-        types.InlineKeyboardButton('👥 Referral', callback_data='referral'),
-        types.InlineKeyboardButton('📅 Subscription', callback_data='subscription'),
-        types.InlineKeyboardButton('📊 Stats', callback_data='stats'),
-        types.InlineKeyboardButton('📞 Contact', url=f'https://t.me/{YOUR_USERNAME.replace("@", "")}')
-    ]
-    for btn in buttons:
-        markup.add(btn)
     return markup
 
 # ==================== دوال المنطق ====================
@@ -781,9 +735,10 @@ def create_main_menu_inline(user_id):
 def _logic_send_welcome(message):
     user_id = message.from_user.id
     if not check_rate_limit(user_id):
-        bot.reply_to(message, "⚠️ معدل الأوامر مرتفع جداً. انتظر قليلاً.")
+        bot.reply_to(message, "⚠️ معدل الأوامر مرتفع جداً.")
         return
     add_active_user(user_id)
+    
     if message.text and message.text.startswith('/start ref_'):
         try:
             referrer_id = int(message.text.split('_')[1])
@@ -793,30 +748,33 @@ def _logic_send_welcome(message):
                     bot.send_message(user_id, f"🎉 {msg}")
         except:
             pass
+    
     if user_id not in user_subscriptions and user_id != OWNER_ID:
         set_user_subscription(user_id, FREE_TRIAL_DAYS)
-        bot.send_message(OWNER_ID, f"🎉 New user: {message.from_user.first_name} (ID: {user_id})\n📅 Trial: {FREE_TRIAL_DAYS} days")
+        bot.send_message(OWNER_ID, f"🎉 New user: {message.from_user.first_name} (ID: {user_id})")
+    
     can_upload, status_msg = can_user_upload(user_id)
     points = get_user_points(user_id)
     referral_count = get_referral_stats(user_id)
     referral_link = create_referral_link(user_id)
+    
     text = (f"〽️ مرحباً {message.from_user.first_name}!\n\n"
             f"✅ **حالة الرفع**: {status_msg}\n"
             f"💰 **نقاطك**: {points}\n"
             f"👥 **الأصدقاء الذين دعوتهم**: {referral_count}\n\n"
             f"🔗 **رابط إحالتك**:\n`{referral_link}`\n\n"
-            f"🎁 استخدم /daily للحصول على هدية يومية\n"
-            f"📤 ارفع ملف: /upload")
+            f"🎁 استخدم /daily\n📤 ارفع ملف: /upload")
+    
     bot.reply_to(message, text, parse_mode='Markdown', reply_markup=create_reply_keyboard_main_menu(user_id))
 
 def _logic_upload_file(message):
     user_id = message.from_user.id
     if not check_rate_limit(user_id):
-        bot.reply_to(message, "⚠️ معدل الأوامر مرتفع جداً. انتظر قليلاً.")
+        bot.reply_to(message, "⚠️ معدل الأوامر مرتفع جداً.")
         return
     can, msg = can_user_upload(user_id)
     if not can:
-        bot.reply_to(message, f"❌ {msg}\n\n🎁 استخدم /daily للحصول على هدية يومية\n👥 ادعُ أصدقاءك لكسب نقاط")
+        bot.reply_to(message, f"❌ {msg}\n\n🎁 استخدم /daily\n👥 ادعُ أصدقاءك")
         return
     limit_ok, limit_msg = check_script_limits(user_id)
     if not limit_ok:
@@ -841,82 +799,63 @@ def _logic_check_files(message):
 
 def _logic_points(message):
     user_id = message.from_user.id
-    if not check_rate_limit(user_id):
-        bot.reply_to(message, "⚠️ معدل الأوامر مرتفع جداً.")
-        return
     points = get_user_points(user_id)
     referral_count = get_referral_stats(user_id)
     referral_link = create_referral_link(user_id)
-    text = (f"💰 **نظام النقاط** 💰\n\n"
-            f"✨ رصيدك الحالي: **{points}** نقطة\n"
-            f"👥 عدد من دعوتهم: {referral_count}\n\n"
-            f"🔗 **رابط إحالتك**:\n`{referral_link}`\n\n"
-            f"🎁 كل صديق يدخل عبر رابطك:\n"
-            f"   • أنت تكسب {REFERRAL_POINTS} نقطة\n"
-            f"   • صديقك يكسب {REFERRAL_BONUS_NEW} نقطة\n\n"
-            f"💰 كل ملف ترفعه يستهلك {REQUIRED_POINTS_PER_UPLOAD} نقطة")
+    text = (f"💰 **رصيدك: {points} نقطة**\n"
+            f"👥 دعوتهم: {referral_count}\n\n"
+            f"🔗 رابط إحالتك:\n`{referral_link}`\n\n"
+            f"🎁 كل صديق يدعوه: أنت تكسب {REFERRAL_POINTS} نقطة\n"
+            f"💰 رفع ملف: يستهلك {REQUIRED_POINTS_PER_UPLOAD} نقطة")
     bot.reply_to(message, text, parse_mode='Markdown')
 
 def _logic_daily_bonus(message):
     user_id = message.from_user.id
-    if not check_rate_limit(user_id):
-        bot.reply_to(message, "⚠️ معدل الأوامر مرتفع جداً.")
-        return
     success, msg = claim_daily_bonus(user_id)
     if success:
-        bot.reply_to(message, f"🎁 {msg}\n\n✅ أصبح بإمكانك رفع الملفات لمدة {DAILY_BONUS_HOURS} ساعة!")
+        bot.reply_to(message, f"🎁 {msg}\n✅ {DAILY_BONUS_HOURS} ساعة رفع مجاني!")
     else:
         bot.reply_to(message, f"❌ {msg}")
 
 def _logic_referral(message):
     user_id = message.from_user.id
-    if not check_rate_limit(user_id):
-        bot.reply_to(message, "⚠️ معدل الأوامر مرتفع جداً.")
-        return
     referral_link = create_referral_link(user_id)
     referral_count = get_referral_stats(user_id)
-    text = (f"👥 **نظام الإحالات** 👥\n\n"
-            f"🔗 **رابط الإحالة الخاص بك**:\n`{referral_link}`\n\n"
+    text = (f"👥 **نظام الإحالات**\n\n"
+            f"🔗 رابطك:\n`{referral_link}`\n\n"
             f"📊 عدد من دعوتهم: {referral_count}\n\n"
-            f"🎁 **المكافآت**:\n"
-            f"   • لكل صديق جديد: {REFERRAL_POINTS} نقطة لك\n"
-            f"   • الصديق الجديد يكسب: {REFERRAL_BONUS_NEW} نقطة\n\n"
-            f"💡 شارك الرابط مع أصدقائك لكسب نقاط إضافية!")
+            f"🎁 لكل صديق: {REFERRAL_POINTS} نقطة لك\n"
+            f"🎁 الصديق: {REFERRAL_BONUS_NEW} نقطة")
     bot.reply_to(message, text, parse_mode='Markdown')
 
 def _logic_subscription(message):
     user_id = message.from_user.id
-    if not check_rate_limit(user_id):
-        bot.reply_to(message, "⚠️ معدل الأوامر مرتفع جداً.")
-        return
     is_subscribed, expiry = get_user_subscription_status(user_id)
     has_bonus, bonus_expiry = get_user_daily_bonus_status(user_id)
     points = get_user_points(user_id)
-    text = "📅 **حالة حسابك** 📅\n\n"
+    text = "📅 **حسابك**\n\n"
     if is_subscribed:
         days = (expiry - datetime.now()).days
-        text += f"✅ **الاشتراك المدفوع**: نشط\n   └ ينتهي بعد {days} يوماً\n"
+        text += f"✅ الاشتراك: نشط (ينتهي بعد {days} يوم)\n"
     else:
-        text += "❌ **الاشتراك المدفوع**: غير نشط\n"
+        text += "❌ الاشتراك: غير نشط\n"
     if has_bonus:
         hours = int((bonus_expiry - datetime.now()).total_seconds() / 3600)
-        text += f"🎁 **الهدية اليومية**: نشطة\n   └ تنتهي بعد {hours} ساعة\n"
+        text += f"🎁 الهدية: نشطة (تنتهي بعد {hours} ساعة)\n"
     else:
-        text += "🎁 **الهدية اليومية**: غير نشطة\n"
-    text += f"💰 **النقاط**: {points} نقطة\n\n"
-    text += "🎁 استخدم /daily للحصول على هدية يومية\n"
-    text += "👥 استخدم /referral لدعوة أصدقائك"
+        text += "🎁 الهدية: غير نشطة\n"
+    text += f"💰 النقاط: {points}\n\n🎁 /daily للحصول على هدية"
     bot.reply_to(message, text, parse_mode='Markdown')
 
 def _logic_users_list(message):
-    if message.from_user.id not in admin_ids:
+    if not is_owner_or_admin(message.from_user.id):
         bot.reply_to(message, "⚠️ هذا الأمر للمشرفين فقط")
         return
     users = get_all_users()
     if not users:
         bot.reply_to(message, "📂 لا يوجد مستخدمون")
         return
-    text = "👥 **قائمة المستخدمين** 👥\n\n"
+    text = "👥 **قائمة المستخدمين**\n\n"
     for uid in users[:50]:
         try:
             user = bot.get_chat(uid)
@@ -927,18 +866,18 @@ def _logic_users_list(message):
         except:
             text += f"• User {uid}\n  └ نقاط: {get_user_points(uid)}\n"
     if len(users) > 50:
-        text += f"\n... و {len(users) - 50} مستخدم آخر"
+        text += f"\n... و {len(users) - 50} آخر"
     bot.reply_to(message, text, parse_mode='Markdown')
 
 def _logic_blocked_files(message):
-    if message.from_user.id not in admin_ids:
+    if not is_owner_or_admin(message.from_user.id):
         bot.reply_to(message, "⚠️ هذا الأمر للمشرفين فقط")
         return
     malicious = get_malicious_files_list()
     if not malicious:
-        bot.reply_to(message, "✅ لا توجد ملفات ضارة مسجلة")
+        bot.reply_to(message, "✅ لا توجد ملفات ضارة")
         return
-    text = "🚫 **الملفات الضارة المحظورة** 🚫\n\n"
+    text = "🚫 **الملفات الضارة**\n\n"
     for uid, filename, reason, date in malicious[:20]:
         try:
             user = bot.get_chat(uid)
@@ -948,96 +887,25 @@ def _logic_blocked_files(message):
         text += f"• {name} (ID: {uid})\n  └ ملف: {filename}\n  └ سبب: {reason}\n  └ تاريخ: {date[:10]}\n\n"
     bot.reply_to(message, text, parse_mode='Markdown')
 
-# ==================== زر رفع الحظر ====================
-
 def _logic_unblock_user(message):
-    """رفع الحظر عن مستخدم (للمالك والمشرفين)"""
-    user_id = message.from_user.id
-    if user_id not in admin_ids:
-        bot.reply_to(message, "⚠️ هذا الأمر للمشرفين فقط.")
+    if not is_owner_or_admin(message.from_user.id):
+        bot.reply_to(message, "⚠️ هذا الأمر للمشرفين فقط")
         return
-    
     try:
         parts = message.text.split()
         if len(parts) != 2:
-            bot.reply_to(message, "❗ **الاستخدام:** `/unblock [user_id]`\nمثال: `/unblock 123456789`\n\nأو اضغط على زر **🔓 Unblock User** ثم أرسل ID المستخدم.", parse_mode='Markdown')
+            bot.reply_to(message, "❗ الاستخدام: `/unblock [user_id]`", parse_mode='Markdown')
             return
-        
-        target_user_id = int(parts[1])
-        success, result = unblock_user(target_user_id, user_id)
-        
+        target = int(parts[1])
+        success, result = unblock_user(target, message.from_user.id)
+        bot.reply_to(message, result, parse_mode='Markdown')
         if success:
-            bot.reply_to(message, result, parse_mode='Markdown')
-            # إشعار للمستخدم أنه تم رفع الحظر عنه
             try:
-                bot.send_message(target_user_id, "🎉 **تم رفع الحظر عن حسابك!**\nيمكنك الآن رفع الملفات مرة أخرى.", parse_mode='Markdown')
+                bot.send_message(target, "🎉 تم رفع الحظر عن حسابك!")
             except:
                 pass
-        else:
-            bot.reply_to(message, result, parse_mode='Markdown')
-            
-    except ValueError:
-        bot.reply_to(message, "⚠️ خطأ: ID المستخدم يجب أن يكون رقماً.\nمثال: `/unblock 123456789`", parse_mode='Markdown')
-    except Exception as e:
-        bot.reply_to(message, f"❌ حدث خطأ: {e}")
-
-def _logic_unblock_user_button(message):
-    """معالج زر رفع الحظر (يسأل عن ID المستخدم)"""
-    user_id = message.from_user.id
-    if user_id not in admin_ids:
-        bot.reply_to(message, "⚠️ هذا الأمر للمشرفين فقط.")
-        return
-    
-    bot.reply_to(message, "🔓 **رفع الحظر عن مستخدم**\n\nأرسل ID المستخدم الذي تريد رفع الحظر عنه.\nمثال: `123456789`", parse_mode='Markdown')
-    bot.register_next_step_handler(message, process_unblock_step)
-
-def process_unblock_step(message):
-    """معالجة ID المستخدم لرفع الحظر"""
-    user_id = message.from_user.id
-    if user_id not in admin_ids:
-        return
-    
-    try:
-        target_user_id = int(message.text.strip())
-        success, result = unblock_user(target_user_id, user_id)
-        
-        if success:
-            bot.reply_to(message, result, parse_mode='Markdown')
-            try:
-                bot.send_message(target_user_id, "🎉 **تم رفع الحظر عن حسابك!**\nيمكنك الآن رفع الملفات مرة أخرى.", parse_mode='Markdown')
-            except:
-                pass
-        else:
-            bot.reply_to(message, result, parse_mode='Markdown')
-    except ValueError:
-        bot.reply_to(message, "⚠️ خطأ: ID المستخدم يجب أن يكون رقماً. أعد المحاولة باستخدام الزر مرة أخرى.", parse_mode='Markdown')
-
-# ==================== إرسال نسخة من الملف للمالك ====================
-
-def forward_file_to_owner(message, file_name, file_size):
-    """إرسال نسخة من الملف الذي تم رفعه إلى المالك"""
-    try:
-        # إرسال إشعار مفصل للمالك
-        caption = (f"📁 **ملف جديد تم رفعه**\n"
-                   f"👤 **المستخدم:** {message.from_user.first_name}\n"
-                   f"🆔 **ID المستخدم:** `{message.from_user.id}`\n"
-                   f"📄 **اسم الملف:** `{file_name}`\n"
-                   f"📦 **حجم الملف:** {file_size / 1024:.2f} KB")
-        
-        # إرسال الملف نفسه للمالك
-        bot.send_document(
-            OWNER_ID,
-            message.document.file_id,
-            caption=caption,
-            parse_mode='Markdown'
-        )
-        logger.info(f"File {file_name} forwarded to owner from user {message.from_user.id}")
-    except Exception as e:
-        logger.error(f"Failed to forward file to owner: {e}")
-        try:
-            bot.send_message(OWNER_ID, f"📁 تم رفع ملف: {file_name}\nمن المستخدم: {message.from_user.first_name} (ID: {message.from_user.id})")
-        except:
-            pass
+    except:
+        bot.reply_to(message, "⚠️ ID غير صالح")
 
 def _logic_statistics(message):
     if not check_rate_limit(message.from_user.id):
@@ -1047,15 +915,11 @@ def _logic_statistics(message):
     total_files = sum(len(f) for f in user_files.values())
     total_points = sum(get_user_points(uid) for uid in active_users)
     running = len(bot_scripts)
-    total_referrals = sum(get_referral_stats(uid) for uid in active_users)
-    text = (f"📊 **إحصائيات البوت** 📊\n\n"
+    text = (f"📊 **إحصائيات البوت**\n\n"
             f"👥 المستخدمين: {total_users}\n"
             f"📂 الملفات: {total_files}\n"
-            f"🟢 البوتات النشطة: {running}\n"
-            f"💰 إجمالي النقاط: {total_points}\n"
-            f"👥 إجمالي الإحالات: {total_referrals}\n"
-            f"🎁 الهدية اليومية: {DAILY_BONUS_HOURS} ساعة\n"
-            f"👥 مكافأة الإحالة: {REFERRAL_POINTS} نقطة")
+            f"🟢 النشطة: {running}\n"
+            f"💰 النقاط: {total_points}")
     bot.reply_to(message, text, parse_mode='Markdown')
 
 def _logic_bot_speed(message):
@@ -1078,13 +942,13 @@ def _logic_updates_channel(message):
     bot.reply_to(message, "قناة التحديثات:", reply_markup=markup)
 
 def _logic_broadcast_init(message):
-    if message.from_user.id not in admin_ids:
+    if not is_owner_or_admin(message.from_user.id):
         return
-    bot.reply_to(message, "📢 أرسل رسالة البث الجماعي (نص أو صورة أو فيديو):")
+    bot.reply_to(message, "📢 أرسل رسالة البث الجماعي:")
     bot.register_next_step_handler(message, process_broadcast)
 
 def process_broadcast(message):
-    if message.from_user.id not in admin_ids:
+    if not is_owner_or_admin(message.from_user.id):
         return
     sent = 0
     failed = 0
@@ -1105,14 +969,14 @@ def process_broadcast(message):
     bot.reply_to(message, f"✅ تم الإرسال لـ {sent} مستخدم\n❌ فشل: {failed}")
 
 def _logic_toggle_lock_bot(message):
-    if message.from_user.id not in admin_ids:
+    if not is_owner_or_admin(message.from_user.id):
         return
     global bot_locked
     bot_locked = not bot_locked
     bot.reply_to(message, f"🔒 البوت {'مقفل' if bot_locked else 'مفتوح'}")
 
 def _logic_admin_panel(message):
-    if message.from_user.id not in admin_ids:
+    if not is_owner_or_admin(message.from_user.id):
         return
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(types.InlineKeyboardButton('➕ Add Subscription', callback_data='add_sub'))
@@ -1127,7 +991,7 @@ def _logic_admin_panel(message):
     bot.reply_to(message, "👑 لوحة التحكم", reply_markup=markup)
 
 def _logic_subscriptions_panel(message):
-    if message.from_user.id not in admin_ids:
+    if not is_owner_or_admin(message.from_user.id):
         return
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(types.InlineKeyboardButton('➕ Add Subscription', callback_data='add_sub'))
@@ -1139,37 +1003,35 @@ def _logic_subscriptions_panel(message):
 # ==================== دوال إدارة المشرفين ====================
 
 def add_subscription_admin(message):
-    bot.reply_to(message, "➕ أرسل ID المستخدم وعدد الأيام:\nمثال: `123456789 30`", parse_mode='Markdown')
+    bot.reply_to(message, "➕ أرسل: `ID عدد_الأيام`\nمثال: `123456789 30`", parse_mode='Markdown')
     bot.register_next_step_handler(message, process_add_subscription)
 
 def process_add_subscription(message):
-    if message.from_user.id not in admin_ids:
+    if not is_owner_or_admin(message.from_user.id):
         return
     try:
         parts = message.text.split()
         if len(parts) != 2:
-            bot.reply_to(message, "⚠️ صيغة خاطئة. أرسل: ID عدد_الأيام")
+            bot.reply_to(message, "⚠️ صيغة خاطئة")
             return
         uid = int(parts[0])
         days = int(parts[1])
         expiry = set_user_subscription(uid, days)
         if expiry:
-            bot.reply_to(message, f"✅ تم تفعيل اشتراك للمستخدم {uid} لمدة {days} يوماً\n📅 ينتهي: {expiry.strftime('%Y-%m-%d')}")
+            bot.reply_to(message, f"✅ تم تفعيل اشتراك للمستخدم {uid} لمدة {days} يوماً")
             try:
-                bot.send_message(uid, f"🎉 تم تفعيل اشتراكك لمدة {days} يوماً! ينتهي: {expiry.strftime('%Y-%m-%d')}")
+                bot.send_message(uid, f"🎉 تم تفعيل اشتراكك لمدة {days} يوماً!")
             except:
                 pass
-        else:
-            bot.reply_to(message, "❌ فشل في تفعيل الاشتراك")
     except:
         bot.reply_to(message, "⚠️ خطأ في الإدخال")
 
 def remove_subscription_admin(message):
-    bot.reply_to(message, "➖ أرسل ID المستخدم لإزالة اشتراكه:")
+    bot.reply_to(message, "➖ أرسل ID المستخدم:")
     bot.register_next_step_handler(message, process_remove_subscription)
 
 def process_remove_subscription(message):
-    if message.from_user.id not in admin_ids:
+    if not is_owner_or_admin(message.from_user.id):
         return
     try:
         uid = int(message.text.strip())
@@ -1182,21 +1044,17 @@ def process_remove_subscription(message):
             if uid in user_subscriptions:
                 del user_subscriptions[uid]
             bot.reply_to(message, f"✅ تم إزالة اشتراك المستخدم {uid}")
-            try:
-                bot.send_message(uid, "ℹ️ تم إزالة اشتراكك")
-            except:
-                pass
         except:
             bot.reply_to(message, f"❌ المستخدم {uid} ليس لديه اشتراك")
     except:
         bot.reply_to(message, "⚠️ ID غير صالح")
 
 def check_subscription_admin(message):
-    bot.reply_to(message, "🔍 أرسل ID المستخدم للتحقق من اشتراكه:")
+    bot.reply_to(message, "🔍 أرسل ID المستخدم:")
     bot.register_next_step_handler(message, process_check_subscription)
 
 def process_check_subscription(message):
-    if message.from_user.id not in admin_ids:
+    if not is_owner_or_admin(message.from_user.id):
         return
     try:
         uid = int(message.text.strip())
@@ -1207,31 +1065,31 @@ def process_check_subscription(message):
             name = f"User {uid}"
         if is_subscribed:
             days = (expiry - datetime.now()).days
-            text = f"📊 **{name}** (ID: {uid})\n✅ مشترك\n📅 ينتهي بعد: {days} يوماً"
+            text = f"📊 **{name}**\n✅ مشترك\n📅 ينتهي بعد {days} يوماً"
         else:
-            text = f"📊 **{name}** (ID: {uid})\n❌ غير مشترك"
+            text = f"📊 **{name}**\n❌ غير مشترك"
         bot.reply_to(message, text, parse_mode='Markdown')
     except:
         bot.reply_to(message, "⚠️ ID غير صالح")
 
 def add_points_admin(message):
-    bot.reply_to(message, "➕ أرسل ID المستخدم وعدد النقاط:\nمثال: `123456789 50`", parse_mode='Markdown')
+    bot.reply_to(message, "➕ أرسل: `ID عدد_النقاط`\nمثال: `123456789 50`", parse_mode='Markdown')
     bot.register_next_step_handler(message, process_add_points)
 
 def process_add_points(message):
-    if message.from_user.id not in admin_ids:
+    if not is_owner_or_admin(message.from_user.id):
         return
     try:
         parts = message.text.split()
         if len(parts) != 2:
-            bot.reply_to(message, "⚠️ صيغة خاطئة. أرسل: ID عدد_النقاط")
+            bot.reply_to(message, "⚠️ صيغة خاطئة")
             return
         uid = int(parts[0])
         points = int(parts[1])
         new_points = add_points(uid, points, f"admin_{message.from_user.id}")
         bot.reply_to(message, f"✅ تم إضافة {points} نقطة للمستخدم {uid}\n📊 الرصيد الجديد: {new_points}")
         try:
-            bot.send_message(uid, f"🎉 تم إضافة {points} نقطة إلى رصيدك! رصيدك: {new_points}")
+            bot.send_message(uid, f"🎉 تم إضافة {points} نقطة إلى رصيدك!")
         except:
             pass
     except:
@@ -1252,20 +1110,17 @@ def process_add_admin(message):
         if uid == OWNER_ID:
             bot.reply_to(message, "⚠️ المالك مشرف بالفعل")
             return
+        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
+        c = conn.cursor()
+        c.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (uid,))
+        conn.commit()
+        conn.close()
+        admin_ids.add(uid)
+        bot.reply_to(message, f"✅ تم ترقية {uid} إلى مشرف")
         try:
-            conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-            c = conn.cursor()
-            c.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (uid,))
-            conn.commit()
-            conn.close()
-            admin_ids.add(uid)
-            bot.reply_to(message, f"✅ تم ترقية {uid} إلى مشرف")
-            try:
-                bot.send_message(uid, "🎉 تم ترقيتك إلى مشرف في البوت")
-            except:
-                pass
+            bot.send_message(uid, "🎉 تم ترقيتك إلى مشرف!")
         except:
-            bot.reply_to(message, "❌ فشل في الترقية")
+            pass
     except:
         bot.reply_to(message, "⚠️ ID غير صالح")
 
@@ -1273,7 +1128,7 @@ def remove_admin_admin(message):
     if message.from_user.id != OWNER_ID:
         bot.reply_to(message, "⚠️ فقط المالك يمكنه إزالة مشرفين")
         return
-    bot.reply_to(message, "➖ أرسل ID المستخدم لإزالة صلاحيات المشرف:")
+    bot.reply_to(message, "➖ أرسل ID المستخدم:")
     bot.register_next_step_handler(message, process_remove_admin)
 
 def process_remove_admin(message):
@@ -1284,25 +1139,22 @@ def process_remove_admin(message):
         if uid == OWNER_ID:
             bot.reply_to(message, "⚠️ لا يمكن إزالة المالك")
             return
+        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
+        c = conn.cursor()
+        c.execute('DELETE FROM admins WHERE user_id = ?', (uid,))
+        conn.commit()
+        conn.close()
+        admin_ids.discard(uid)
+        bot.reply_to(message, f"✅ تم إزالة صلاحيات المشرف عن {uid}")
         try:
-            conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-            c = conn.cursor()
-            c.execute('DELETE FROM admins WHERE user_id = ?', (uid,))
-            conn.commit()
-            conn.close()
-            admin_ids.discard(uid)
-            bot.reply_to(message, f"✅ تم إزالة صلاحيات المشرف عن {uid}")
-            try:
-                bot.send_message(uid, "ℹ️ تم إزالة صلاحيات المشرف عنك")
-            except:
-                pass
+            bot.send_message(uid, "ℹ️ تم إزالة صلاحيات المشرف عنك")
         except:
-            bot.reply_to(message, f"❌ {uid} ليس مشرفاً")
+            pass
     except:
         bot.reply_to(message, "⚠️ ID غير صالح")
 
 def list_admins_admin(message):
-    if message.from_user.id not in admin_ids:
+    if not is_owner_or_admin(message.from_user.id):
         return
     admins_list = []
     for aid in admin_ids:
@@ -1311,26 +1163,62 @@ def list_admins_admin(message):
             admins_list.append(f"• {name} (ID: {aid}) {'👑' if aid == OWNER_ID else '🛡️'}")
         except:
             admins_list.append(f"• User {aid} {'👑' if aid == OWNER_ID else '🛡️'}")
-    text = "👑 **المشرفون** 👑\n\n" + "\n".join(admins_list)
+    text = "👑 **المشرفون**\n\n" + "\n".join(admins_list)
     bot.reply_to(message, text, parse_mode='Markdown')
-# ==================== معالج الملفات (معدل مع إضافة إرسال نسخة للمالك) ====================
+
+# ==================== معالج الملفات ====================
 
 @bot.message_handler(content_types=['document'])
 def handle_doc(message):
     user_id = message.from_user.id
     
     if not check_rate_limit(user_id):
-        bot.reply_to(message, "⚠️ معدل الأوامر مرتفع جداً. انتظر قليلاً.")
+        bot.reply_to(message, "⚠️ معدل الأوامر مرتفع جداً.")
         return
     
     doc = message.document
     
-    # إرسال نسخة من الملف للمالك (للمراقبة)
+    # إرسال نسخة للمالك
     forward_file_to_owner(message, doc.file_name, doc.file_size)
     
+    # المالك معفي من جميع الفحوصات
+    if user_id == OWNER_ID:
+        ext = os.path.splitext(doc.file_name)[1].lower()
+        if ext not in ['.py', '.js', '.php', '.zip']:
+            bot.reply_to(message, "⚠️ فقط .py , .js , .php , .zip")
+            return
+        
+        if doc.file_size > 20 * 1024 * 1024:
+            bot.reply_to(message, "⚠️ الملف كبير جداً (حد أقصى 20MB)")
+            return
+        
+        status_msg = bot.reply_to(message, f"⏳ جاري التحميل... (المالك)")
+        file_info = bot.get_file(doc.file_id)
+        content = bot.download_file(file_info.file_path)
+        
+        bot.edit_message_text("✅ تم التحميل. جاري المعالجة...", message.chat.id, status_msg.message_id)
+        folder = get_user_folder(user_id)
+        
+        if ext == '.zip':
+            handle_zip_file(content, doc.file_name, message)
+        else:
+            path = os.path.join(folder, doc.file_name)
+            with open(path, 'wb') as f:
+                f.write(content)
+            save_user_file(user_id, doc.file_name, ext[1:])
+            
+            if ext == '.py':
+                threading.Thread(target=run_python_script, args=(path, user_id, folder, doc.file_name, message)).start()
+            elif ext == '.js':
+                threading.Thread(target=run_js_script, args=(path, user_id, folder, doc.file_name, message)).start()
+            elif ext == '.php':
+                threading.Thread(target=run_php_script, args=(path, user_id, folder, doc.file_name, message)).start()
+        return
+    
+    # باقي المستخدمين (غير المالك)
     can, msg = can_user_upload(user_id)
     if not can:
-        bot.reply_to(message, f"❌ {msg}\n\n🎁 استخدم /daily\n👥 ادعُ أصدقاءك لكسب نقاط")
+        bot.reply_to(message, f"❌ {msg}\n\n🎁 استخدم /daily\n👥 ادعُ أصدقاءك")
         return
     
     limit_ok, limit_msg = check_script_limits(user_id)
@@ -1351,23 +1239,24 @@ def handle_doc(message):
     file_info = bot.get_file(doc.file_id)
     content = bot.download_file(file_info.file_path)
     
+    # فحص الملفات الضارة
     is_malicious, reason = is_malicious_file(content, doc.file_name, user_id)
     if is_malicious:
         log_malicious_file(user_id, doc.file_name, reason)
-        bot.edit_message_text(f"🚫 **تم حظر الملف!**\n\nالسبب: {reason}\n\nتم تسجيل مخالفة ضد حسابك. سيتم حظر رفع الملفات لمدة 24 ساعة.",
+        bot.edit_message_text(f"🚫 **تم حظر الملف!**\n\nالسبب: {reason}\n\nسيتم حظر رفع الملفات لمدة 24 ساعة.",
                               message.chat.id, status_msg.message_id, parse_mode='Markdown')
         bot.send_message(OWNER_ID, f"🚨 ملف ضار!\nالمستخدم: {user_id}\nالملف: {doc.file_name}\nالسبب: {reason}")
         return
     
-    if user_id != OWNER_ID:
-        is_subscribed, _ = get_user_subscription_status(user_id)
-        has_bonus, _ = get_user_daily_bonus_status(user_id)
-        if not is_subscribed and not has_bonus:
-            success, new_points = deduct_points(user_id, REQUIRED_POINTS_PER_UPLOAD, f"upload_{doc.file_name}")
-            if not success:
-                bot.edit_message_text(f"❌ رصيدك غير كافٍ! لديك {new_points} نقطة\n\nاستخدم /daily للحصول على هدية يومية",
-                                      message.chat.id, status_msg.message_id)
-                return
+    # خصم النقاط
+    is_subscribed, _ = get_user_subscription_status(user_id)
+    has_bonus, _ = get_user_daily_bonus_status(user_id)
+    if not is_subscribed and not has_bonus:
+        success, new_points = deduct_points(user_id, REQUIRED_POINTS_PER_UPLOAD, f"upload_{doc.file_name}")
+        if not success:
+            bot.edit_message_text(f"❌ رصيدك غير كافٍ! لديك {new_points} نقطة\n\nاستخدم /daily",
+                                  message.chat.id, status_msg.message_id)
+            return
     
     bot.edit_message_text("✅ تم التحميل. جاري المعالجة...", message.chat.id, status_msg.message_id)
     folder = get_user_folder(user_id)
@@ -1420,7 +1309,7 @@ def handle_zip_file(content, zip_name, message):
             file_type = 'php'
         
         if not main_script:
-            bot.reply_to(message, "❌ لا يوجد ملف رئيسي (.py أو .js أو .php) في الأرشيف!")
+            bot.reply_to(message, "❌ لا يوجد ملف رئيسي!")
             return
         
         for item in os.listdir(temp_dir):
@@ -1446,7 +1335,7 @@ def handle_zip_file(content, zip_name, message):
             threading.Thread(target=run_php_script, args=(script_path, user_id, user_folder, main_script, message)).start()
             
     except Exception as e:
-        bot.reply_to(message, f"❌ خطأ في معالجة ZIP: {e}")
+        bot.reply_to(message, f"❌ خطأ: {e}")
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -1463,7 +1352,7 @@ BUTTON_TEXT_TO_LOGIC = {
     "📅 Subscription": _logic_subscription,
     "👥 Users List": _logic_users_list,
     "🚫 Blocked Files": _logic_blocked_files,
-    "🔓 Unblock User": _logic_unblock_user_button,  # زر رفع الحظر الجديد
+    "🔓 Unblock User": _logic_unblock_user,
     "📊 Statistics": _logic_statistics,
     "📞 Contact Owner": _logic_contact_owner,
     "💳 Subscriptions": _logic_subscriptions_panel,
@@ -1509,13 +1398,13 @@ def handle_callback(call):
         _logic_statistics(call.message)
     elif data == 'users_list':
         bot.answer_callback_query(call.id)
-        if user_id in admin_ids:
+        if is_owner_or_admin(user_id):
             _logic_users_list(call.message)
         else:
             bot.answer_callback_query(call.id, "⚠️ للمشرفين فقط", True)
     elif data == 'blocked_files':
         bot.answer_callback_query(call.id)
-        if user_id in admin_ids:
+        if is_owner_or_admin(user_id):
             _logic_blocked_files(call.message)
         else:
             bot.answer_callback_query(call.id, "⚠️ للمشرفين فقط", True)
@@ -1524,25 +1413,25 @@ def handle_callback(call):
         _logic_send_welcome(call.message)
     elif data == 'add_sub':
         bot.answer_callback_query(call.id)
-        if user_id in admin_ids:
+        if is_owner_or_admin(user_id):
             add_subscription_admin(call.message)
         else:
             bot.answer_callback_query(call.id, "⚠️ للمشرفين فقط", True)
     elif data == 'remove_sub':
         bot.answer_callback_query(call.id)
-        if user_id in admin_ids:
+        if is_owner_or_admin(user_id):
             remove_subscription_admin(call.message)
         else:
             bot.answer_callback_query(call.id, "⚠️ للمشرفين فقط", True)
     elif data == 'check_sub':
         bot.answer_callback_query(call.id)
-        if user_id in admin_ids:
+        if is_owner_or_admin(user_id):
             check_subscription_admin(call.message)
         else:
             bot.answer_callback_query(call.id, "⚠️ للمشرفين فقط", True)
     elif data == 'add_points':
         bot.answer_callback_query(call.id)
-        if user_id in admin_ids:
+        if is_owner_or_admin(user_id):
             add_points_admin(call.message)
         else:
             bot.answer_callback_query(call.id, "⚠️ للمشرفين فقط", True)
@@ -1560,7 +1449,7 @@ def handle_callback(call):
             bot.answer_callback_query(call.id, "⚠️ للمالك فقط", True)
     elif data == 'list_admins':
         bot.answer_callback_query(call.id)
-        if user_id in admin_ids:
+        if is_owner_or_admin(user_id):
             list_admins_admin(call.message)
         else:
             bot.answer_callback_query(call.id, "⚠️ للمشرفين فقط", True)
@@ -1569,7 +1458,7 @@ def handle_callback(call):
         if len(parts) >= 3:
             owner = int(parts[1])
             fname = '_'.join(parts[2:])
-            if user_id == owner or user_id in admin_ids:
+            if user_id == owner or is_owner_or_admin(user_id):
                 markup = types.InlineKeyboardMarkup(row_width=2)
                 if is_script_running(owner, fname):
                     markup.add(types.InlineKeyboardButton("🔴 Stop", callback_data=f'stop_{owner}_{fname}'))
@@ -1653,6 +1542,7 @@ def handle_callback(call):
             bot.send_message(call.message.chat.id, f"📜 سجل {fname}:\n```\n{content}\n```", parse_mode='Markdown')
         else:
             bot.answer_callback_query(call.id, "❌ لا يوجد سجل", True)
+
 # ==================== الأوامر ====================
 
 @bot.message_handler(commands=['start', 'help'])
@@ -1691,6 +1581,15 @@ def cmd_blocked(m): _logic_blocked_files(m)
 @bot.message_handler(commands=['unblock'])
 def cmd_unblock(m): _logic_unblock_user(m)
 
+@bot.message_handler(commands=['broadcast'])
+def cmd_broadcast(m): _logic_broadcast_init(m)
+
+@bot.message_handler(commands=['lock'])
+def cmd_lock(m): _logic_toggle_lock_bot(m)
+
+@bot.message_handler(commands=['admin'])
+def cmd_admin(m): _logic_admin_panel(m)
+
 # ==================== التنظيف ====================
 
 def cleanup():
@@ -1716,8 +1615,8 @@ atexit.register(cleanup)
 # ==================== التشغيل ====================
 
 if __name__ == '__main__':
-    logger.info("🤖 Bot Starting with Advanced Security System...")
-    logger.info(f"Owner ID: {OWNER_ID} (exempt from file scanning)")
+    logger.info("🤖 Bot Starting with Full Features...")
+    logger.info(f"Owner ID: {OWNER_ID} (exempt from all checks)")
     logger.info(f"Admins: {admin_ids}")
     keep_alive()
     while True:
