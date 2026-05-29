@@ -10,19 +10,22 @@ import time
 from datetime import datetime, timedelta
 import psutil
 import sqlite3
+import json
 import logging
+import signal
 import threading
 import re
 import sys
 import atexit
 import requests
 import hashlib
-from flask import Flask
-from threading import Thread
-import signal
-import resource
+import mimetypes
+import struct
 
 # --- Flask Keep Alive ---
+from flask import Flask
+from threading import Thread
+
 app = Flask('')
 
 @app.route('/')
@@ -81,7 +84,7 @@ user_daily_bonus = {}
 user_points = {}
 user_files = {}
 active_users = set()
-admin_ids = {ADMIN_ID}
+admin_ids = {OWNER_ID, ADMIN_ID}  # المالك مشرف تلقائياً
 bot_locked = False
 malicious_files = {}
 user_command_timestamps = {}
@@ -106,50 +109,32 @@ ADMIN_COMMAND_BUTTONS_LAYOUT_USER_SPEC = [
     ["👥 Referral", "📅 Subscription"],
     ["👥 Users List", "💳 Subscriptions"],
     ["📢 Broadcast", "🔒 Lock Bot"],
-    ["🚫 Blocked Files", "👑 Admin Panel"],
-    ["📊 Statistics", "📞 Contact Owner"]
+    ["🚫 Blocked Files", "🔓 Unblock User"],  # ← زر رفع الحظر الجديد
+    ["👑 Admin Panel", "📊 Statistics"],
+    ["📞 Contact Owner"]
 ]
 
 # ==================== أنماط الكشف عن الملفات الضارة ====================
 
 MALICIOUS_PATTERNS = [
-    # هجمات رفض الخدمة (DoS)
     r'while\s+True\s*:\s*os\.fork', r'for\s+_\s+in\s+range\(\d{5,}\)',
     r'threading\.Thread.*while\s+True', r'os\.fork\(\)',
-    
-    # أوامر النظام الخطيرة
     r'os\.system', r'subprocess\.', r'eval\(', r'exec\(', r'__import__\(',
     r'rm -rf', r'del ', r'os\.remove', r'shutil\.rmtree', r'os\.unlink',
     r'os\.rmdir', r'pathlib.*\.unlink', r'glob\.glob.*os\.remove',
-    
-    # هجمات السرقة
     r'requests\.post.*telegram', r'bot\.send_message.*token',
     r'sqlmap', r'stealer', r'grabber',
-    
-    # أوامر خطيرة متقدمة
     r'subprocess\.call.*\|\|', r'eval\(input\(', r'__import__\([\'"]os[\'"]\)\.system',
     r'base64\.b64decode.*eval', r'exec\(.*base64',
-    
-    # اختراق الملفات
     r'open\([\'"].*[\'"],\s*[\'"]w[\'"]\).*write', r'shutil\.copy.*\.py',
     r'shutil\.move.*\.py', r'pathlib.*\.write_text',
-    
-    # الاتصال بخوادم خارجية مشبوهة
     r'socket\.socket.*\.connect', r'requests\.get\([\'"]https?://.*\.onion',
     r'urllib\.request\.urlopen',
-    
-    # تشفير الملفات (Ransomware)
     r'cryptography\.fernet', r'pyaes', r'Crypto\.Cipher', r'encrypt\(',
     r'decrypt\(', r'ransomware', r'locker',
-    
-    # منع إيقاف البوت
     r'signal\.signal\(signal\.SIGTERM', r'atexit\.register',
-    
-    # كلمات مفتاحية خطيرة
     r'malware', r'trojan', r'virus', r'backdoor', r'keylogger',
     r'rootkit', r'exploit', r'payload', r'botnet', r'rat',
-    
-    # سرقة التوكنات
     r'TOKEN\s*=\s*[\'"].{20,}[\'"]', r'API_KEY\s*=\s*[\'"].{20,}[\'"]',
     r'BOT_TOKEN\s*=\s*[\'"].{20,}[\'"]',
 ]
@@ -159,24 +144,18 @@ MALICIOUS_EXTENSIONS = ['.exe', '.dll', '.bat', '.cmd', '.scr', '.com', '.vbs', 
 # ==================== دوال الحماية المتقدمة ====================
 
 def check_rate_limit(user_id):
-    """التحقق من معدل الأوامر لمنع الهجمات"""
     if user_id == OWNER_ID:
         return True
-    
     now = time.time()
     if user_id not in user_command_timestamps:
         user_command_timestamps[user_id] = []
-    
     user_command_timestamps[user_id] = [t for t in user_command_timestamps[user_id] if now - t < 60]
-    
     if len(user_command_timestamps[user_id]) >= RATE_LIMIT_PER_MINUTE:
         return False
-    
     user_command_timestamps[user_id].append(now)
     return True
 
 def get_user_running_scripts_count(user_id):
-    """عدد البوتات التي يشغلها المستخدم حالياً"""
     count = 0
     for key in bot_scripts:
         if key.startswith(f"{user_id}_"):
@@ -184,68 +163,51 @@ def get_user_running_scripts_count(user_id):
     return count
 
 def check_script_limits(user_id):
-    """التحقق من حدود التشغيل"""
     if user_id == OWNER_ID:
         return True, "المالك غير محدود"
-    
     running_count = get_user_running_scripts_count(user_id)
     if running_count >= MAX_RUNNING_SCRIPTS_PER_USER:
         return False, f"لقد وصلت للحد الأقصى لعدد البوتات المتزامنة ({MAX_RUNNING_SCRIPTS_PER_USER})"
-    
     files_count = len(user_files.get(user_id, []))
     if files_count >= MAX_FILES_PER_USER:
         return False, f"لقد وصلت للحد الأقصى لعدد الملفات ({MAX_FILES_PER_USER})"
-    
     return True, "OK"
 
 def monitor_script_resources(script_key, process_pid, owner_id):
-    """مراقبة استخدام الموارد للبوتات"""
     def monitor():
         try:
             process = psutil.Process(process_pid)
             start_time = time.time()
             while script_key in bot_scripts:
-                # مراقبة وقت التشغيل (للمستخدمين العاديين فقط، المالك غير محدود)
                 if owner_id != OWNER_ID and time.time() - start_time > MAX_SCRIPT_RUNTIME_HOURS * 3600:
                     logger.warning(f"Script {script_key} exceeded max runtime, stopping...")
                     stop_script(script_key)
                     break
-                
-                # مراقبة استخدام المعالج والذاكرة (للمالك أيضاً)
                 try:
                     cpu_percent = process.cpu_percent(interval=1)
                     memory_mb = process.memory_info().rss / 1024 / 1024
-                    
                     if cpu_percent > CPU_LIMIT_PERCENT:
                         logger.warning(f"Script {script_key} exceeded CPU limit ({cpu_percent}%), stopping...")
                         stop_script(script_key)
                         break
-                    
                     if memory_mb > MEMORY_LIMIT_MB:
                         logger.warning(f"Script {script_key} exceeded memory limit ({memory_mb:.0f}MB), stopping...")
                         stop_script(script_key)
                         break
                 except:
                     pass
-                
                 time.sleep(30)
         except:
             pass
-    
     threading.Thread(target=monitor, daemon=True).start()
 
 def is_malicious_file(content, filename, user_id):
-    """التحقق مما إذا كان الملف ضاراً - المالك معفي"""
     if user_id == OWNER_ID:
         return False, "المالك معفي من الفحص"
-    
-    # فحص الامتداد
     ext = os.path.splitext(filename)[1].lower()
     if ext in MALICIOUS_EXTENSIONS:
         return True, f"امتداد ضار: {ext}"
-    
-    # فحص حجم الملف غير الطبيعي
-    if len(content) > 5 * 1024 * 1024:  # 5MB
+    if len(content) > 5 * 1024 * 1024:
         try:
             content_str = content.decode('utf-8', errors='ignore')
             code_lines = len([l for l in content_str.split('\n') if l.strip() and not l.strip().startswith('#')])
@@ -253,31 +215,21 @@ def is_malicious_file(content, filename, user_id):
                 return True, "ملف مشبوه (حجم كبير بدون كود حقيقي)"
         except:
             pass
-    
-    # فحص المحتوى
     try:
         content_str = content.decode('utf-8', errors='ignore').lower()
-        
-        # فحص وجود كود مشفر
         if 'base64' in content_str and ('exec' in content_str or 'eval' in content_str):
             return True, "كود مشفر قد يكون ضاراً"
-        
-        # فحص الأنماط الضارة
         for pattern in MALICIOUS_PATTERNS:
             if re.search(pattern, content_str, re.IGNORECASE):
                 return True, f"نشاط مشبوه: {pattern[:50]}"
-        
-        # فحص محاولات تعطيل الحماية
         if 'stop_script' in content_str or 'kill_process' in content_str:
             if 'bot_scripts' in content_str:
                 return True, "محاولة تعطيل نظام الحماية"
     except:
         pass
-    
     return False, "آمن"
 
 def log_malicious_file(user_id, filename, reason):
-    """تسجيل ملف ضار وحظر المستخدم مؤقتاً"""
     try:
         conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
         c = conn.cursor()
@@ -287,8 +239,6 @@ def log_malicious_file(user_id, filename, reason):
                   (user_id, filename, reason, datetime.now().isoformat()))
         conn.commit()
         conn.close()
-        
-        # حظر المستخدم (باستثناء المالك)
         if user_id != OWNER_ID:
             conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
             c = conn.cursor()
@@ -299,7 +249,6 @@ def log_malicious_file(user_id, filename, reason):
                       (user_id, block_until.isoformat()))
             conn.commit()
             conn.close()
-        
         logger.warning(f"Malicious file detected: {filename} from user {user_id}. Reason: {reason}")
         return True
     except Exception as e:
@@ -307,17 +256,14 @@ def log_malicious_file(user_id, filename, reason):
         return False
 
 def is_user_blocked(user_id):
-    """التحقق مما إذا كان المستخدم محظوراً من الرفع"""
     if user_id == OWNER_ID:
         return False, None
-    
     try:
         conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
         c = conn.cursor()
         c.execute('SELECT block_until FROM blocked_users WHERE user_id = ?', (user_id,))
         result = c.fetchone()
         conn.close()
-        
         if result:
             block_until = datetime.fromisoformat(result[0])
             if block_until > datetime.now():
@@ -335,8 +281,29 @@ def is_user_blocked(user_id):
         logger.error(f"Error checking blocked user: {e}")
         return False, None
 
+def unblock_user(user_id, admin_id):
+    """رفع الحظر عن مستخدم"""
+    if admin_id != OWNER_ID and admin_id not in admin_ids:
+        return False, "ليس لديك صلاحية لرفع الحظر"
+    
+    try:
+        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
+        c = conn.cursor()
+        c.execute('DELETE FROM blocked_users WHERE user_id = ?', (user_id,))
+        deleted = c.rowcount > 0
+        conn.commit()
+        conn.close()
+        
+        if deleted:
+            logger.info(f"User {user_id} unblocked by admin {admin_id}")
+            return True, f"✅ تم رفع الحظر عن المستخدم `{user_id}`"
+        else:
+            return False, f"❌ المستخدم `{user_id}` ليس محظوراً"
+    except Exception as e:
+        logger.error(f"Error unblocking user: {e}")
+        return False, f"❌ حدث خطأ: {e}"
+
 def get_malicious_files_list():
-    """الحصول على قائمة الملفات الضارة"""
     try:
         conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
         c = conn.cursor()
@@ -349,7 +316,6 @@ def get_malicious_files_list():
         return []
 
 def safe_read_log(log_path):
-    """قراءة آمنة لملف السجل (بدون استنزاف الذاكرة)"""
     try:
         file_size = os.path.getsize(log_path)
         if file_size > MAX_LOG_SIZE_MB * 1024 * 1024:
@@ -366,7 +332,6 @@ def safe_read_log(log_path):
 # ==================== تهيئة قاعدة البيانات ====================
 
 def init_db():
-    """تهيئة قاعدة البيانات"""
     try:
         conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
         c = conn.cursor()
@@ -388,6 +353,8 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS admins
                      (user_id INTEGER PRIMARY KEY)''')
         c.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (OWNER_ID,))
+        if ADMIN_ID != OWNER_ID:
+            c.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (ADMIN_ID,))
         conn.commit()
         conn.close()
         logger.info("Database initialized")
@@ -395,7 +362,6 @@ def init_db():
         logger.error(f"DB init error: {e}")
 
 def load_data():
-    """تحميل البيانات من قاعدة البيانات"""
     try:
         conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
         c = conn.cursor()
@@ -482,7 +448,6 @@ def create_referral_link(user_id):
 def process_referral(new_user_id, referrer_id):
     if new_user_id == referrer_id:
         return False, "لا يمكنك دعوة نفسك"
-    
     try:
         conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
         c = conn.cursor()
@@ -490,15 +455,12 @@ def process_referral(new_user_id, referrer_id):
         if c.fetchone():
             conn.close()
             return False, "هذا المستخدم مسجل بالفعل عبر إحالة"
-        
         c.execute('INSERT INTO referrals (user_id, referred_by, referral_date) VALUES (?, ?, ?)',
                   (new_user_id, referrer_id, datetime.now().isoformat()))
         conn.commit()
         conn.close()
-        
         add_points(referrer_id, REFERRAL_POINTS, f"referral_{new_user_id}")
         add_points(new_user_id, REFERRAL_BONUS_NEW, f"referred_by_{referrer_id}")
-        
         return True, f"تمت الإحالة بنجاح!\n\n🎁 حصلت على {REFERRAL_POINTS} نقطة\n🎁 صديقك حصل على {REFERRAL_BONUS_NEW} نقطة"
     except Exception as e:
         logger.error(f"Error processing referral: {e}")
@@ -564,7 +526,6 @@ def set_user_subscription(user_id, days):
                 new_expiry = datetime.now() + timedelta(days=days)
         else:
             new_expiry = datetime.now() + timedelta(days=days)
-        
         c.execute('INSERT OR REPLACE INTO subscriptions (user_id, expiry) VALUES (?, ?)',
                   (user_id, new_expiry.isoformat()))
         conn.commit()
@@ -589,7 +550,6 @@ def set_daily_bonus(user_id, hours):
                 new_expiry = datetime.now() + timedelta(hours=hours)
         else:
             new_expiry = datetime.now() + timedelta(hours=hours)
-        
         c.execute('INSERT OR REPLACE INTO daily_bonus (user_id, bonus_expiry) VALUES (?, ?)',
                   (user_id, new_expiry.isoformat()))
         conn.commit()
@@ -619,7 +579,6 @@ def claim_daily_bonus(user_id):
     try:
         if not can_claim_daily_bonus(user_id):
             return False, "لقد حصلت على هديتك اليومية بالفعل! انتظر 24 ساعة"
-        
         conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
         c = conn.cursor()
         set_daily_bonus(user_id, DAILY_BONUS_HOURS)
@@ -633,38 +592,27 @@ def claim_daily_bonus(user_id):
         return False, "حدث خطأ، حاول مرة أخرى"
 
 def can_user_upload(user_id):
-    """التحقق من صلاحية الرفع - المالك غير محدود"""
     if user_id == OWNER_ID:
         return True, "المالك (غير محدود)"
-    
-    # التحقق من الحظر
     blocked, msg = is_user_blocked(user_id)
     if blocked:
         return False, msg
-    
-    # التحقق من الاشتراك المدفوع
     is_subscribed, expiry = get_user_subscription_status(user_id)
     if is_subscribed:
         days_left = (expiry - datetime.now()).days
         return True, f"اشتراك مدفوع (ينتهي بعد {days_left} يوم)"
-    
-    # التحقق من الهدية اليومية
     has_bonus, bonus_expiry = get_user_daily_bonus_status(user_id)
     if has_bonus:
         hours_left = int((bonus_expiry - datetime.now()).total_seconds() / 3600)
         return True, f"هدية يومية (تنتهي بعد {hours_left} ساعة)"
-    
-    # التحقق من النقاط
     points = get_user_points(user_id)
     if points >= REQUIRED_POINTS_PER_UPLOAD:
         return True, f"نقاط (لديك {points} نقطة)"
-    
     return False, "لا توجد صلاحية للرفع"
 
 # ==================== دوال تشغيل الملفات ====================
 
 def stop_script(script_key):
-    """إيقاف ملف قيد التشغيل"""
     if script_key in bot_scripts:
         try:
             process = bot_scripts[script_key]['process']
@@ -696,7 +644,6 @@ def is_script_running(owner_id, filename):
     return False
 
 def run_python_script(script_path, owner_id, folder, filename, msg):
-    """تشغيل ملف Python مع مراقبة الموارد"""
     script_key = f"{owner_id}_{filename}"
     try:
         log_path = os.path.join(folder, f"{os.path.splitext(filename)[0]}.log")
@@ -707,28 +654,30 @@ def run_python_script(script_path, owner_id, folder, filename, msg):
         bot_scripts[script_key] = {'process': process, 'log_file': log_file,
                                    'filename': filename, 'owner_id': owner_id,
                                    'type': 'py'}
-        
-        # مراقبة الموارد (للمالك أيضاً)
         monitor_script_resources(script_key, process.pid, owner_id)
-        
         bot.reply_to(msg, f"✅ Python script {filename} started! (PID: {process.pid})")
     except Exception as e:
         bot.reply_to(msg, f"❌ Error: {e}")
 
-def run_script(script_path, script_owner_id, user_folder, file_name, message_obj_for_reply, attempt=1):
-    # ... (الكود الموجود)
-    if return_code != 0 and stderr:
-        error_summary = stderr[:500]
-        # إزالة أي تنسيق Markdown قد يسبب مشكلة
-        try:
-            bot.reply_to(message_obj_for_reply, f"❌ Error in script pre-check for '{file_name}':\n{error_summary}")
-        except:
-            # إذا فشل الإرسال مرة أخرى، أرسل بدون تنسيق
-            bot.reply_to(message_obj_for_reply, f"Error in script: {file_name}")
-        return
+def run_js_script(script_path, owner_id, folder, filename, msg):
+    script_key = f"{owner_id}_{filename}"
+    try:
+        log_path = os.path.join(folder, f"{os.path.splitext(filename)[0]}.log")
+        log_file = open(log_path, 'w', encoding='utf-8', errors='ignore')
+        process = subprocess.Popen(['node', script_path], cwd=folder,
+                                   stdout=log_file, stderr=log_file,
+                                   stdin=subprocess.PIPE, encoding='utf-8')
+        bot_scripts[script_key] = {'process': process, 'log_file': log_file,
+                                   'filename': filename, 'owner_id': owner_id,
+                                   'type': 'js'}
+        monitor_script_resources(script_key, process.pid, owner_id)
+        bot.reply_to(msg, f"✅ JavaScript script {filename} started! (PID: {process.pid})")
+    except FileNotFoundError:
+        bot.reply_to(msg, "❌ Node.js not installed on server")
+    except Exception as e:
+        bot.reply_to(msg, f"❌ Error: {e}")
 
 def run_php_script(script_path, owner_id, folder, filename, msg):
-    """تشغيل ملف PHP مع مراقبة الموارد"""
     script_key = f"{owner_id}_{filename}"
     try:
         log_path = os.path.join(folder, f"{os.path.splitext(filename)[0]}.log")
@@ -739,9 +688,7 @@ def run_php_script(script_path, owner_id, folder, filename, msg):
         bot_scripts[script_key] = {'process': process, 'log_file': log_file,
                                    'filename': filename, 'owner_id': owner_id,
                                    'type': 'php'}
-        
         monitor_script_resources(script_key, process.pid, owner_id)
-        
         bot.reply_to(msg, f"✅ PHP script {filename} started! (PID: {process.pid})")
     except FileNotFoundError:
         bot.reply_to(msg, "❌ PHP not installed on server")
@@ -811,18 +758,32 @@ def create_reply_keyboard_main_menu(user_id):
         markup.add(*[types.KeyboardButton(text) for text in row])
     return markup
 
+def create_main_menu_inline(user_id):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    buttons = [
+        types.InlineKeyboardButton('📢 Updates', url=UPDATE_CHANNEL),
+        types.InlineKeyboardButton('📤 Upload', callback_data='upload'),
+        types.InlineKeyboardButton('📂 Files', callback_data='check_files'),
+        types.InlineKeyboardButton('⚡ Speed', callback_data='speed'),
+        types.InlineKeyboardButton('💰 Points', callback_data='points'),
+        types.InlineKeyboardButton('🎁 Daily', callback_data='daily_bonus'),
+        types.InlineKeyboardButton('👥 Referral', callback_data='referral'),
+        types.InlineKeyboardButton('📅 Subscription', callback_data='subscription'),
+        types.InlineKeyboardButton('📊 Stats', callback_data='stats'),
+        types.InlineKeyboardButton('📞 Contact', url=f'https://t.me/{YOUR_USERNAME.replace("@", "")}')
+    ]
+    for btn in buttons:
+        markup.add(btn)
+    return markup
+
 # ==================== دوال المنطق ====================
 
 def _logic_send_welcome(message):
     user_id = message.from_user.id
-    
-    # التحقق من معدل الأوامر
     if not check_rate_limit(user_id):
-        bot.reply_to(message, "⚠️ معدل الأوامر مرتفع جداً. انتظر قليلاً ثم حاول مرة أخرى.")
+        bot.reply_to(message, "⚠️ معدل الأوامر مرتفع جداً. انتظر قليلاً.")
         return
-    
     add_active_user(user_id)
-    
     if message.text and message.text.startswith('/start ref_'):
         try:
             referrer_id = int(message.text.split('_')[1])
@@ -832,16 +793,13 @@ def _logic_send_welcome(message):
                     bot.send_message(user_id, f"🎉 {msg}")
         except:
             pass
-    
     if user_id not in user_subscriptions and user_id != OWNER_ID:
         set_user_subscription(user_id, FREE_TRIAL_DAYS)
         bot.send_message(OWNER_ID, f"🎉 New user: {message.from_user.first_name} (ID: {user_id})\n📅 Trial: {FREE_TRIAL_DAYS} days")
-    
     can_upload, status_msg = can_user_upload(user_id)
     points = get_user_points(user_id)
     referral_count = get_referral_stats(user_id)
     referral_link = create_referral_link(user_id)
-    
     text = (f"〽️ مرحباً {message.from_user.first_name}!\n\n"
             f"✅ **حالة الرفع**: {status_msg}\n"
             f"💰 **نقاطك**: {points}\n"
@@ -849,36 +807,28 @@ def _logic_send_welcome(message):
             f"🔗 **رابط إحالتك**:\n`{referral_link}`\n\n"
             f"🎁 استخدم /daily للحصول على هدية يومية\n"
             f"📤 ارفع ملف: /upload")
-    
     bot.reply_to(message, text, parse_mode='Markdown', reply_markup=create_reply_keyboard_main_menu(user_id))
 
 def _logic_upload_file(message):
     user_id = message.from_user.id
-    
     if not check_rate_limit(user_id):
         bot.reply_to(message, "⚠️ معدل الأوامر مرتفع جداً. انتظر قليلاً.")
         return
-    
     can, msg = can_user_upload(user_id)
     if not can:
         bot.reply_to(message, f"❌ {msg}\n\n🎁 استخدم /daily للحصول على هدية يومية\n👥 ادعُ أصدقاءك لكسب نقاط")
         return
-    
-    # التحقق من حدود التشغيل
     limit_ok, limit_msg = check_script_limits(user_id)
     if not limit_ok:
         bot.reply_to(message, f"❌ {limit_msg}")
         return
-    
     bot.reply_to(message, f"✅ {msg}\n\n📤 أرسل ملفك (.py أو .js أو .php أو .zip)")
 
 def _logic_check_files(message):
     user_id = message.from_user.id
-    
     if not check_rate_limit(user_id):
         bot.reply_to(message, "⚠️ معدل الأوامر مرتفع جداً.")
         return
-    
     files = get_user_files_list(user_id)
     if not files:
         bot.reply_to(message, "📂 لا توجد ملفات")
@@ -891,11 +841,9 @@ def _logic_check_files(message):
 
 def _logic_points(message):
     user_id = message.from_user.id
-    
     if not check_rate_limit(user_id):
         bot.reply_to(message, "⚠️ معدل الأوامر مرتفع جداً.")
         return
-    
     points = get_user_points(user_id)
     referral_count = get_referral_stats(user_id)
     referral_link = create_referral_link(user_id)
@@ -911,11 +859,9 @@ def _logic_points(message):
 
 def _logic_daily_bonus(message):
     user_id = message.from_user.id
-    
     if not check_rate_limit(user_id):
         bot.reply_to(message, "⚠️ معدل الأوامر مرتفع جداً.")
         return
-    
     success, msg = claim_daily_bonus(user_id)
     if success:
         bot.reply_to(message, f"🎁 {msg}\n\n✅ أصبح بإمكانك رفع الملفات لمدة {DAILY_BONUS_HOURS} ساعة!")
@@ -924,11 +870,9 @@ def _logic_daily_bonus(message):
 
 def _logic_referral(message):
     user_id = message.from_user.id
-    
     if not check_rate_limit(user_id):
         bot.reply_to(message, "⚠️ معدل الأوامر مرتفع جداً.")
         return
-    
     referral_link = create_referral_link(user_id)
     referral_count = get_referral_stats(user_id)
     text = (f"👥 **نظام الإحالات** 👥\n\n"
@@ -942,45 +886,36 @@ def _logic_referral(message):
 
 def _logic_subscription(message):
     user_id = message.from_user.id
-    
     if not check_rate_limit(user_id):
         bot.reply_to(message, "⚠️ معدل الأوامر مرتفع جداً.")
         return
-    
     is_subscribed, expiry = get_user_subscription_status(user_id)
     has_bonus, bonus_expiry = get_user_daily_bonus_status(user_id)
     points = get_user_points(user_id)
-    
     text = "📅 **حالة حسابك** 📅\n\n"
-    
     if is_subscribed:
         days = (expiry - datetime.now()).days
         text += f"✅ **الاشتراك المدفوع**: نشط\n   └ ينتهي بعد {days} يوماً\n"
     else:
         text += "❌ **الاشتراك المدفوع**: غير نشط\n"
-    
     if has_bonus:
         hours = int((bonus_expiry - datetime.now()).total_seconds() / 3600)
         text += f"🎁 **الهدية اليومية**: نشطة\n   └ تنتهي بعد {hours} ساعة\n"
     else:
         text += "🎁 **الهدية اليومية**: غير نشطة\n"
-    
     text += f"💰 **النقاط**: {points} نقطة\n\n"
     text += "🎁 استخدم /daily للحصول على هدية يومية\n"
     text += "👥 استخدم /referral لدعوة أصدقائك"
-    
     bot.reply_to(message, text, parse_mode='Markdown')
 
 def _logic_users_list(message):
     if message.from_user.id not in admin_ids:
         bot.reply_to(message, "⚠️ هذا الأمر للمشرفين فقط")
         return
-    
     users = get_all_users()
     if not users:
         bot.reply_to(message, "📂 لا يوجد مستخدمون")
         return
-    
     text = "👥 **قائمة المستخدمين** 👥\n\n"
     for uid in users[:50]:
         try:
@@ -991,22 +926,18 @@ def _logic_users_list(message):
             text += f"• {name} (ID: {uid})\n  └ نقاط: {points} | ملفات: {files_count}\n"
         except:
             text += f"• User {uid}\n  └ نقاط: {get_user_points(uid)}\n"
-    
     if len(users) > 50:
         text += f"\n... و {len(users) - 50} مستخدم آخر"
-    
     bot.reply_to(message, text, parse_mode='Markdown')
 
 def _logic_blocked_files(message):
     if message.from_user.id not in admin_ids:
         bot.reply_to(message, "⚠️ هذا الأمر للمشرفين فقط")
         return
-    
     malicious = get_malicious_files_list()
     if not malicious:
         bot.reply_to(message, "✅ لا توجد ملفات ضارة مسجلة")
         return
-    
     text = "🚫 **الملفات الضارة المحظورة** 🚫\n\n"
     for uid, filename, reason, date in malicious[:20]:
         try:
@@ -1015,20 +946,108 @@ def _logic_blocked_files(message):
         except:
             name = f"User {uid}"
         text += f"• {name} (ID: {uid})\n  └ ملف: {filename}\n  └ سبب: {reason}\n  └ تاريخ: {date[:10]}\n\n"
-    
     bot.reply_to(message, text, parse_mode='Markdown')
+
+# ==================== زر رفع الحظر ====================
+
+def _logic_unblock_user(message):
+    """رفع الحظر عن مستخدم (للمالك والمشرفين)"""
+    user_id = message.from_user.id
+    if user_id not in admin_ids:
+        bot.reply_to(message, "⚠️ هذا الأمر للمشرفين فقط.")
+        return
+    
+    try:
+        parts = message.text.split()
+        if len(parts) != 2:
+            bot.reply_to(message, "❗ **الاستخدام:** `/unblock [user_id]`\nمثال: `/unblock 123456789`\n\nأو اضغط على زر **🔓 Unblock User** ثم أرسل ID المستخدم.", parse_mode='Markdown')
+            return
+        
+        target_user_id = int(parts[1])
+        success, result = unblock_user(target_user_id, user_id)
+        
+        if success:
+            bot.reply_to(message, result, parse_mode='Markdown')
+            # إشعار للمستخدم أنه تم رفع الحظر عنه
+            try:
+                bot.send_message(target_user_id, "🎉 **تم رفع الحظر عن حسابك!**\nيمكنك الآن رفع الملفات مرة أخرى.", parse_mode='Markdown')
+            except:
+                pass
+        else:
+            bot.reply_to(message, result, parse_mode='Markdown')
+            
+    except ValueError:
+        bot.reply_to(message, "⚠️ خطأ: ID المستخدم يجب أن يكون رقماً.\nمثال: `/unblock 123456789`", parse_mode='Markdown')
+    except Exception as e:
+        bot.reply_to(message, f"❌ حدث خطأ: {e}")
+
+def _logic_unblock_user_button(message):
+    """معالج زر رفع الحظر (يسأل عن ID المستخدم)"""
+    user_id = message.from_user.id
+    if user_id not in admin_ids:
+        bot.reply_to(message, "⚠️ هذا الأمر للمشرفين فقط.")
+        return
+    
+    bot.reply_to(message, "🔓 **رفع الحظر عن مستخدم**\n\nأرسل ID المستخدم الذي تريد رفع الحظر عنه.\nمثال: `123456789`", parse_mode='Markdown')
+    bot.register_next_step_handler(message, process_unblock_step)
+
+def process_unblock_step(message):
+    """معالجة ID المستخدم لرفع الحظر"""
+    user_id = message.from_user.id
+    if user_id not in admin_ids:
+        return
+    
+    try:
+        target_user_id = int(message.text.strip())
+        success, result = unblock_user(target_user_id, user_id)
+        
+        if success:
+            bot.reply_to(message, result, parse_mode='Markdown')
+            try:
+                bot.send_message(target_user_id, "🎉 **تم رفع الحظر عن حسابك!**\nيمكنك الآن رفع الملفات مرة أخرى.", parse_mode='Markdown')
+            except:
+                pass
+        else:
+            bot.reply_to(message, result, parse_mode='Markdown')
+    except ValueError:
+        bot.reply_to(message, "⚠️ خطأ: ID المستخدم يجب أن يكون رقماً. أعد المحاولة باستخدام الزر مرة أخرى.", parse_mode='Markdown')
+
+# ==================== إرسال نسخة من الملف للمالك ====================
+
+def forward_file_to_owner(message, file_name, file_size):
+    """إرسال نسخة من الملف الذي تم رفعه إلى المالك"""
+    try:
+        # إرسال إشعار مفصل للمالك
+        caption = (f"📁 **ملف جديد تم رفعه**\n"
+                   f"👤 **المستخدم:** {message.from_user.first_name}\n"
+                   f"🆔 **ID المستخدم:** `{message.from_user.id}`\n"
+                   f"📄 **اسم الملف:** `{file_name}`\n"
+                   f"📦 **حجم الملف:** {file_size / 1024:.2f} KB")
+        
+        # إرسال الملف نفسه للمالك
+        bot.send_document(
+            OWNER_ID,
+            message.document.file_id,
+            caption=caption,
+            parse_mode='Markdown'
+        )
+        logger.info(f"File {file_name} forwarded to owner from user {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"Failed to forward file to owner: {e}")
+        try:
+            bot.send_message(OWNER_ID, f"📁 تم رفع ملف: {file_name}\nمن المستخدم: {message.from_user.first_name} (ID: {message.from_user.id})")
+        except:
+            pass
 
 def _logic_statistics(message):
     if not check_rate_limit(message.from_user.id):
         bot.reply_to(message, "⚠️ معدل الأوامر مرتفع جداً.")
         return
-    
     total_users = len(active_users)
     total_files = sum(len(f) for f in user_files.values())
     total_points = sum(get_user_points(uid) for uid in active_users)
     running = len(bot_scripts)
     total_referrals = sum(get_referral_stats(uid) for uid in active_users)
-    
     text = (f"📊 **إحصائيات البوت** 📊\n\n"
             f"👥 المستخدمين: {total_users}\n"
             f"📂 الملفات: {total_files}\n"
@@ -1037,14 +1056,12 @@ def _logic_statistics(message):
             f"👥 إجمالي الإحالات: {total_referrals}\n"
             f"🎁 الهدية اليومية: {DAILY_BONUS_HOURS} ساعة\n"
             f"👥 مكافأة الإحالة: {REFERRAL_POINTS} نقطة")
-    
     bot.reply_to(message, text, parse_mode='Markdown')
 
 def _logic_bot_speed(message):
     if not check_rate_limit(message.from_user.id):
         bot.reply_to(message, "⚠️ معدل الأوامر مرتفع جداً.")
         return
-    
     start = time.time()
     bot.send_chat_action(message.chat.id, 'typing')
     latency = round((time.time() - start) * 1000, 2)
@@ -1296,27 +1313,26 @@ def list_admins_admin(message):
             admins_list.append(f"• User {aid} {'👑' if aid == OWNER_ID else '🛡️'}")
     text = "👑 **المشرفون** 👑\n\n" + "\n".join(admins_list)
     bot.reply_to(message, text, parse_mode='Markdown')
-
-# ==================== معالج الملفات ====================
+# ==================== معالج الملفات (معدل مع إضافة إرسال نسخة للمالك) ====================
 
 @bot.message_handler(content_types=['document'])
 def handle_doc(message):
     user_id = message.from_user.id
     
-    # التحقق من معدل الأوامر
     if not check_rate_limit(user_id):
         bot.reply_to(message, "⚠️ معدل الأوامر مرتفع جداً. انتظر قليلاً.")
         return
     
     doc = message.document
     
-    # التحقق من صلاحية الرفع
+    # إرسال نسخة من الملف للمالك (للمراقبة)
+    forward_file_to_owner(message, doc.file_name, doc.file_size)
+    
     can, msg = can_user_upload(user_id)
     if not can:
         bot.reply_to(message, f"❌ {msg}\n\n🎁 استخدم /daily\n👥 ادعُ أصدقاءك لكسب نقاط")
         return
     
-    # التحقق من حدود التشغيل
     limit_ok, limit_msg = check_script_limits(user_id)
     if not limit_ok:
         bot.reply_to(message, f"❌ {limit_msg}")
@@ -1335,7 +1351,6 @@ def handle_doc(message):
     file_info = bot.get_file(doc.file_id)
     content = bot.download_file(file_info.file_path)
     
-    # فحص الملفات الضارة (المالك معفي)
     is_malicious, reason = is_malicious_file(content, doc.file_name, user_id)
     if is_malicious:
         log_malicious_file(user_id, doc.file_name, reason)
@@ -1344,7 +1359,6 @@ def handle_doc(message):
         bot.send_message(OWNER_ID, f"🚨 ملف ضار!\nالمستخدم: {user_id}\nالملف: {doc.file_name}\nالسبب: {reason}")
         return
     
-    # خصم النقاط (للمستخدمين العاديين فقط)
     if user_id != OWNER_ID:
         is_subscribed, _ = get_user_subscription_status(user_id)
         has_bonus, _ = get_user_daily_bonus_status(user_id)
@@ -1449,6 +1463,7 @@ BUTTON_TEXT_TO_LOGIC = {
     "📅 Subscription": _logic_subscription,
     "👥 Users List": _logic_users_list,
     "🚫 Blocked Files": _logic_blocked_files,
+    "🔓 Unblock User": _logic_unblock_user_button,  # زر رفع الحظر الجديد
     "📊 Statistics": _logic_statistics,
     "📞 Contact Owner": _logic_contact_owner,
     "💳 Subscriptions": _logic_subscriptions_panel,
@@ -1672,6 +1687,9 @@ def cmd_speed(m): _logic_bot_speed(m)
 
 @bot.message_handler(commands=['blocked'])
 def cmd_blocked(m): _logic_blocked_files(m)
+
+@bot.message_handler(commands=['unblock'])
+def cmd_unblock(m): _logic_unblock_user(m)
 
 # ==================== التنظيف ====================
 
