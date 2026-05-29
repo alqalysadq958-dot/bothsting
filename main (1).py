@@ -2,30 +2,6 @@
 import subprocess
 import sys
 import os
-
-required_modules = {
-    'telebot': 'pyTelegramBotAPI',
-    'requests': 'requests',
-    'Crypto': 'pycryptodome'
-}
-missing_packages = []
-
-for module, package in required_modules.items():
-    try:
-        __import__(module)
-    except ImportError:
-        missing_packages.append(package)
-
-if missing_packages:
-    print(f"📦 جاري تثبيت الحزم المفقودة: {missing_packages}")
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing_packages)
-        print("✅ تم التثبيت بنجاح، يرجى إعادة تشغيل السكريبت.")
-        sys.exit(0)
-    except subprocess.CalledProcessError as e:
-        print(f"❌ فشل التثبيت: {e}")
-        sys.exit(1)
-
 import telebot
 import json
 import threading
