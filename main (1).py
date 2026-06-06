@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-TOKEN = "8261011531:AAF7zTtN_YSa4LsRUhKiTfL41Lw4u4onmWs"
+TOKEN = "8509187930:AAHChZHtkQcHcWNWUaffzheRFLqV1YkyHXk"
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 
 UPLOAD_FOLDER = "uploaded_files"
